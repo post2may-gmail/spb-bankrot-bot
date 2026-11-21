@@ -10,6 +10,7 @@ from bankrot_bot.db import Database
 from bankrot_bot.filters import passes_lot_filters
 from bankrot_bot.http_client import make_client
 from bankrot_bot.models import Lot, ScanStats, utc_now_iso
+from bankrot_bot.photos import enrich_photos_from_torgiopen, normalize_photo_urls
 from bankrot_bot.sources.tbankrot import fetch_tbankrot_lots
 from bankrot_bot.sources.torgi import fetch_torgi_lots
 from bankrot_bot.telegram_notify import TelegramNotifier
@@ -76,6 +77,9 @@ class Scanner:
         published_count = 0
         error: str | None = None
         try:
+            purged = self._purge_non_matching()
+            if purged:
+                logger.info("purged %s lots that are not realty / fail filters", purged)
             async with make_client() as client:
                 for name, fetcher in (
                     ("tbankrot", fetch_tbankrot_lots),
@@ -91,7 +95,11 @@ class Scanner:
                         st.published = n_pub
                         st.skipped_share = skipped["share"]
                         st.skipped_rent = skipped["rent"]
-                        st.skipped_other = skipped["other"]
+                        st.skipped_other = (
+                            skipped["other"]
+                            + skipped.get("not_realty", 0)
+                            + skipped.get("not_apartment", 0)
+                        )
                         new_count += n_new
                         published_count += n_pub
                     except Exception as exc:  # noqa: BLE001
@@ -143,12 +151,59 @@ class Scanner:
             "error": error,
         }
 
+    def _purge_non_matching(self) -> int:
+        """Убирает из выдачи старые лоты, которые больше не проходят фильтр."""
+        removed = 0
+        for row in self.db.list_lots(limit=5000, include_hidden=True):
+            lot = Lot(
+                source=row.get("source") or "",
+                external_id=row.get("external_id") or "",
+                title=row.get("title") or "",
+                description=row.get("description") or "",
+                url=row.get("url") or "",
+                price=row.get("price"),
+                address=row.get("address") or "",
+                area_sqm=row.get("area_sqm"),
+                region=row.get("region") or "",
+                category=row.get("category") or "",
+                auction_form=row.get("auction_form") or "",
+                published_at=row.get("published_at"),
+                dedupe_key=row.get("dedupe_key") or "",
+            )
+            ok, reason = passes_lot_filters(lot)
+            if ok:
+                continue
+            self.db.delete_lot(lot.dedupe_key)
+            removed += 1
+            logger.info("removed lot %s (%s)", lot.dedupe_key, reason)
+        return removed
+
+    async def _ensure_photos(self, client: httpx.AsyncClient, lot: Lot) -> Lot:
+        photos = normalize_photo_urls(lot.photos, limit=10)
+        if photos:
+            lot.photos = photos
+            return lot
+        query = " ".join(
+            part for part in (lot.title, lot.address) if part
+        ).strip()
+        enriched = await enrich_photos_from_torgiopen(client, query=query, limit=10)
+        if enriched:
+            lot.photos = enriched
+            logger.info("enriched %s photos for %s", len(enriched), lot.dedupe_key)
+        return lot
+
     async def _ingest(
         self,
         client: httpx.AsyncClient,
         lots: list[Lot],
     ) -> tuple[int, int, dict[str, int]]:
-        skipped = {"share": 0, "rent": 0, "other": 0}
+        skipped = {
+            "share": 0,
+            "rent": 0,
+            "not_realty": 0,
+            "not_apartment": 0,
+            "other": 0,
+        }
         new_count = 0
         published_count = 0
         for lot in lots:
@@ -156,6 +211,7 @@ class Scanner:
             if not ok:
                 skipped[reason if reason in skipped else "other"] += 1
                 continue
+            lot = await self._ensure_photos(client, lot)
             is_new = self.db.upsert_lot(lot)
             if not is_new:
                 continue

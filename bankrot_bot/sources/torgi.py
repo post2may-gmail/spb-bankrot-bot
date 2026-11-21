@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from bankrot_bot.models import Lot
+from bankrot_bot.photos import normalize_photo_urls
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +153,16 @@ def _from_torgiopen_item(item: dict[str, Any]) -> Lot | None:
     title = (item.get("title") or "").strip()
     description = (item.get("description") or "").strip()
     address = (item.get("address") or "").strip()
-    blob = " ".join([title, description, address])
+    category = item.get("category") or {}
+    cat_slug = ""
+    cat_name = "Недвижимость"
+    if isinstance(category, dict):
+        cat_slug = str(category.get("slug") or "")
+        cat_name = str(category.get("name") or cat_name)
+    # Жёстко только категория недвижимости у зеркала.
+    if cat_slug and cat_slug != "real_estate":
+        return None
+    blob = " ".join([title, description, address, cat_name])
 
     sources = item.get("sources") or []
     source_names = " ".join(str(s.get("source") or "") for s in sources if isinstance(s, dict))
@@ -189,12 +199,13 @@ def _from_torgiopen_item(item: dict[str, Any]) -> Lot | None:
         address=address,
         area_sqm=_num(item.get("areaSqm")),
         region=(item.get("region") or {}).get("name") if isinstance(item.get("region"), dict) else "Санкт-Петербург",
-        category=(item.get("category") or {}).get("name")
-        if isinstance(item.get("category"), dict)
-        else "Недвижимость",
+        category=cat_name,
         auction_form=str(item.get("auctionForm") or ""),
         published_at=str(item.get("publishedAt") or "") or None,
-        photos=[p for p in (item.get("photos") or []) if isinstance(p, str)],
+        photos=normalize_photo_urls(
+            [p for p in (item.get("photos") or []) if isinstance(p, str)],
+            limit=10,
+        ),
         raw_text=blob,
         dedupe_key=f"torgiopen:{item.get('dedupKey') or external_id}",
     )
@@ -206,33 +217,40 @@ async def _fetch_torgiopen(
     max_pages: int,
 ) -> list[Lot]:
     lots: list[Lot] = []
-    for page in range(1, max_pages + 1):
-        params = {
-            "region": "78",
-            "category": "real_estate",
-            "channel": "bankruptcy",
-            "pageSize": 50,
-            "page": page,
-            "sort": "fresh",
-        }
-        try:
-            resp = await client.get(TORGIOPEN_API, params=params, timeout=30.0)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("torgiopen page %s failed: %s", page, exc)
-            break
-        items = data.get("items") or []
-        if not items:
-            break
-        for item in items:
-            lot = _from_torgiopen_item(item)
-            if lot:
+    seen: set[str] = set()
+    queries = ("квартира", "жилое помещение", "")
+    for query in queries:
+        for page in range(1, max_pages + 1):
+            params: dict[str, Any] = {
+                "region": "78",
+                "category": "real_estate",
+                "channel": "bankruptcy",
+                "pageSize": 50,
+                "page": page,
+                "sort": "fresh",
+            }
+            if query:
+                params["q"] = query
+            try:
+                resp = await client.get(TORGIOPEN_API, params=params, timeout=30.0)
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("torgiopen q=%r page %s failed: %s", query, page, exc)
+                break
+            items = data.get("items") or []
+            if not items:
+                break
+            for item in items:
+                lot = _from_torgiopen_item(item)
+                if not lot or lot.dedupe_key in seen:
+                    continue
+                seen.add(lot.dedupe_key)
                 lots.append(lot)
-        meta = data.get("meta") or {}
-        total_pages = int(meta.get("totalPages") or 1)
-        if page >= total_pages:
-            break
+            meta = data.get("meta") or {}
+            total_pages = int(meta.get("totalPages") or 1)
+            if page >= total_pages:
+                break
     return lots
 
 

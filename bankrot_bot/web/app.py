@@ -89,11 +89,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "dry_run": settings.dry_run,
             "interval": settings.scan_interval_sec,
             "filters": [
-                "Недвижимость",
+                "Только квартира / жилое помещение",
                 "Санкт-Петербург",
                 "Продажа",
                 "Банкротство",
                 "Без долевой собственности",
+                "С фото в Telegram, если есть",
             ],
             "sources": ["tbankrot.ru", "ГИС «Торги» / открытые данные"],
         }

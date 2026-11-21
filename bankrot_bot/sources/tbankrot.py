@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import re
 from html import unescape
-from typing import Any
 from urllib.parse import urlencode, urljoin
 
 import httpx
@@ -14,30 +13,31 @@ logger = logging.getLogger(__name__)
 
 BASE = "https://tbankrot.ru"
 
-# Санкт-Петербург + недвижимость (жилая/нежилая/земля) + секция банкротство.
-# stop — стоп-слова долевой собственности на стороне агрегатора.
-SEARCH_PARAMS: list[tuple[str, str]] = [
+# Базовые фильтры: СПб + недвижимость + банкротство + продажа + стоп-слова.
+BASE_PARAMS: list[tuple[str, str]] = [
     ("region[]", "58"),
     ("parent_cat[]", "2"),
-    ("sub_cat[]", "3"),
-    ("sub_cat[]", "4"),
-    ("sub_cat[]", "5"),
     ("etp[]", "bankrupt"),
-    ("type_1", "on"),  # публичное предложение
-    ("type_2", "on"),  # аукцион
+    ("type_1", "on"),
+    ("type_2", "on"),
     ("stop", "доля, долевой, долей, аренда, аренды, найм"),
     ("sort", "created"),
     ("sort_order", "desc"),
 ]
 
+# Два поисковых запроса под нужные формулировки лотов.
+SEARCH_QUERIES = ("квартира", '"жилое помещение"')
+
 LOT_SPLIT = re.compile(r'<div class="lot_title">', re.I)
 TAG_RE = re.compile(r"<[^>]+>")
 WS_RE = re.compile(r"\s+")
-PRICE_RE = re.compile(
-    r"(\d[\d\s]{2,}(?:[.,]\d{1,2})?)\s*₽",
-)
+PRICE_RE = re.compile(r"(\d[\d\s]{2,}(?:[.,]\d{1,2})?)\s*₽")
 AREA_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*м\s*[²2]", re.I)
 ADDR_RE = re.compile(r"Адрес:\s*([^<]{5,180})", re.I)
+IMG_RE = re.compile(
+    r'(?:src|data-src|data-lazy)=["\'](https?://[^"\']+\.(?:jpg|jpeg|png|webp)[^"\']*)["\']',
+    re.I,
+)
 
 
 def _clean(text: str) -> str:
@@ -71,7 +71,6 @@ def _parse_address(html_chunk: str, plain: str) -> str:
     m = ADDR_RE.search(html_chunk)
     if m:
         return _clean(m.group(1))
-    # fallback: строка с Санкт-Петербург
     for part in re.split(r"[.|;]", plain):
         if "петербург" in part.lower() or "спб" in part.lower():
             return part.strip()[:180]
@@ -79,7 +78,6 @@ def _parse_address(html_chunk: str, plain: str) -> str:
 
 
 def _guess_title(plain: str, lot_id: str) -> str:
-    # Часто формат: "<id> Лот N <blur> <Title>, Санкт-Петербург ..."
     m = re.search(
         rf"{lot_id}\s+Лот\s+\d+\s+(?:▒+\s+)?(.+?)(?:\s+Адрес:|\s+Cведения|\s+Сведения|$)",
         plain,
@@ -87,11 +85,20 @@ def _guess_title(plain: str, lot_id: str) -> str:
     )
     if m:
         title = m.group(1).strip()
-        # обрежем слишком длинное описание
         if len(title) > 160:
             title = title[:157] + "…"
         return title
     return f"Лот {lot_id}"
+
+
+def _extract_photos(html_chunk: str) -> list[str]:
+    photos: list[str] = []
+    for url in IMG_RE.findall(html_chunk):
+        if "blur" in url.lower() or "logo" in url.lower():
+            continue
+        if url not in photos:
+            photos.append(url)
+    return photos[:10]
 
 
 def parse_listing_html(html: str) -> list[Lot]:
@@ -113,7 +120,6 @@ def parse_listing_html(html: str) -> list[Lot]:
         price = _parse_price(plain)
         area = _parse_area(plain)
         url = urljoin(BASE, f"/item?id={lot_id}")
-        # описание — кусок текста после заголовка
         description = plain
         if title and title in description:
             description = description.split(title, 1)[-1].strip()
@@ -129,9 +135,10 @@ def parse_listing_html(html: str) -> list[Lot]:
                 address=address,
                 area_sqm=area,
                 region="Санкт-Петербург",
-                category="Недвижимость",
+                category="Квартира / жилое помещение",
                 auction_form="банкротство",
                 raw_text=plain,
+                photos=_extract_photos(chunk),
             )
         )
     return lots
@@ -144,29 +151,28 @@ async def fetch_tbankrot_lots(
 ) -> list[Lot]:
     results: list[Lot] = []
     seen: set[str] = set()
-    for page in range(1, max_pages + 1):
-        params = list(SEARCH_PARAMS)
-        if page > 1:
-            params.append(("page", str(page)))
-        url = f"{BASE}/?{urlencode(params)}"
-        logger.info("tbankrot fetch page=%s", page)
-        try:
-            resp = await client.get(url)
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            logger.warning("tbankrot page %s failed: %s", page, exc)
-            break
-        page_lots = parse_listing_html(resp.text)
-        if not page_lots:
-            break
-        for lot in page_lots:
-            if lot.external_id in seen:
-                continue
-            seen.add(lot.external_id)
-            results.append(lot)
-        # пагинация на первой странице после фильтра stop может быть пустой
-        if page == 1 and "page=" not in resp.text:
-            # всё равно пробуем page=2 если набрали мало
-            if len(page_lots) < 4:
+    for query in SEARCH_QUERIES:
+        for page in range(1, max_pages + 1):
+            params = list(BASE_PARAMS)
+            params.append(("search", query))
+            if page > 1:
+                params.append(("page", str(page)))
+            url = f"{BASE}/?{urlencode(params)}"
+            logger.info("tbankrot fetch query=%r page=%s", query, page)
+            try:
+                resp = await client.get(url)
+                resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                logger.warning("tbankrot page %s failed: %s", page, exc)
+                break
+            page_lots = parse_listing_html(resp.text)
+            if not page_lots:
+                break
+            for lot in page_lots:
+                if lot.external_id in seen:
+                    continue
+                seen.add(lot.external_id)
+                results.append(lot)
+            if page == 1 and "page=" not in resp.text and len(page_lots) < 4:
                 break
     return results
