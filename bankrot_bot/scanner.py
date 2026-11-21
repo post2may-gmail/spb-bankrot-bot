@@ -154,7 +154,8 @@ class Scanner:
     def _purge_non_matching(self) -> int:
         """Убирает из выдачи старые лоты, которые больше не проходят фильтр."""
         removed = 0
-        for row in self.db.list_lots(limit=5000, include_hidden=True):
+        # Без include_hidden — совместимо со старым db.py на хостинге.
+        for row in self.db.list_lots(limit=5000):
             lot = Lot(
                 source=row.get("source") or "",
                 external_id=row.get("external_id") or "",
@@ -173,9 +174,14 @@ class Scanner:
             ok, reason = passes_lot_filters(lot)
             if ok:
                 continue
-            self.db.delete_lot(lot.dedupe_key)
+            key = lot.dedupe_key
+            if hasattr(self.db, "delete_lot"):
+                self.db.delete_lot(key)
+            else:
+                with self.db.connection() as conn:
+                    conn.execute("DELETE FROM lots WHERE dedupe_key = ?", (key,))
             removed += 1
-            logger.info("removed lot %s (%s)", lot.dedupe_key, reason)
+            logger.info("removed lot %s (%s)", key, reason)
         return removed
 
     async def _ensure_photos(self, client: httpx.AsyncClient, lot: Lot) -> Lot:

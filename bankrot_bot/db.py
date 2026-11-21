@@ -165,17 +165,27 @@ class Database:
                 (reason, dedupe_key),
             )
 
+    def delete_lot(self, dedupe_key: str) -> None:
+        with self.connection() as conn:
+            conn.execute("DELETE FROM lots WHERE dedupe_key = ?", (dedupe_key,))
+
     def list_lots(
         self,
         *,
         limit: int = 50,
         status: str | None = None,
+        include_hidden: bool = False,
     ) -> list[dict[str, Any]]:
         query = "SELECT * FROM lots"
         params: list[Any] = []
+        clauses: list[str] = []
         if status:
-            query += " WHERE status = ?"
+            clauses.append("status = ?")
             params.append(status)
+        elif not include_hidden:
+            clauses.append("status NOT IN ('filtered_out', 'not_realty')")
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY first_seen_at DESC LIMIT ?"
         params.append(limit)
         with self.connection() as conn:
