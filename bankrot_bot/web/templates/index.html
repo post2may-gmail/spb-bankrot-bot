@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SPB Bankrot Bot — лоты недвижимости</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&family=Source+Serif+4:opsz,wght@8..60,600;8..60,700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="bg"></div>
+  <header class="top">
+    <div class="brand">
+      <span class="mark">SB</span>
+      <div>
+        <p class="brand-name">SPB Bankrot Bot</p>
+        <p class="brand-sub">Недвижимость · Санкт-Петербург · банкротство</p>
+      </div>
+    </div>
+    <div class="status-pills">
+      {% if telegram_ok %}
+        <span class="pill ok">Telegram подключён</span>
+      {% else %}
+        <span class="pill warn">Telegram: нужен токен</span>
+      {% endif %}
+      {% if dry_run %}
+        <span class="pill">DRY RUN</span>
+      {% endif %}
+      <span class="pill">опрос каждые {{ interval // 60 }} мин</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h1>Лоты без долей — только продажа</h1>
+      <p>
+        Бот собирает торги по банкротству с tbankrot.ru и ГИС «Торги»,
+        отбрасывает аренду и долевую собственность, публикует подходящие лоты в Telegram.
+      </p>
+      <div class="cta-row">
+        <button id="scanBtn" type="button">Сканировать сейчас</button>
+        <a class="ghost" href="/api/lots">JSON лотов</a>
+      </div>
+      <p id="scanMsg" class="msg" hidden></p>
+    </section>
+
+    <section class="stats">
+      <div>
+        <strong>{{ counts.total }}</strong>
+        <span>в базе</span>
+      </div>
+      <div>
+        <strong>{{ counts.pending }}</strong>
+        <span>ожидают Telegram</span>
+      </div>
+      <div>
+        <strong>{{ counts.published }}</strong>
+        <span>опубликовано</span>
+      </div>
+    </section>
+
+    <section class="filters">
+      <h2>Фильтры</h2>
+      <ul>
+        {% for f in filters %}
+          <li>{{ f }}</li>
+        {% endfor %}
+      </ul>
+      <p class="sources">Источники: {{ sources | join(' · ') }}</p>
+      {% if latest %}
+        <p class="sources">Последний скан: {{ latest.finished_at }} · новых {{ latest.new_count }}, в TG {{ latest.published_count }}</p>
+      {% endif %}
+    </section>
+
+    <section class="lots">
+      <h2>Последние лоты</h2>
+      {% if not lots %}
+        <p class="empty">Пока пусто — нажмите «Сканировать сейчас».</p>
+      {% else %}
+        <ul class="lot-list">
+          {% for lot in lots %}
+            <li>
+              <div class="lot-head">
+                <a href="{{ lot.url }}" target="_blank" rel="noopener">{{ lot.title }}</a>
+                <span class="tag">{{ lot.source }}</span>
+                <span class="tag {{ lot.status }}">{{ lot.status }}</span>
+              </div>
+              <p class="meta">
+                {% if lot.price %}{{ '%.0f'|format(lot.price) }} ₽ · {% endif %}
+                {% if lot.area_sqm %}{{ lot.area_sqm }} м² · {% endif %}
+                {{ lot.address or 'адрес уточняется' }}
+              </p>
+              <p class="desc">{{ lot.description[:220] }}{% if lot.description|length > 220 %}…{% endif %}</p>
+            </li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </section>
+  </main>
+
+  <footer>
+    <p>Исключаются лоты со словами «доля», «долевой», «долей» и аренда. Проверяйте условия на площадке перед участием.</p>
+  </footer>
+
+  <script>
+    const btn = document.getElementById('scanBtn');
+    const msg = document.getElementById('scanMsg');
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      msg.hidden = false;
+      msg.textContent = 'Сканирование…';
+      try {
+        const res = await fetch('/api/scan', { method: 'POST' });
+        const data = await res.json();
+        if (data.ok) {
+          msg.textContent = `Готово: новых ${data.new_count}, в Telegram ${data.published_count}`;
+          setTimeout(() => location.reload(), 900);
+        } else {
+          msg.textContent = data.error || 'Ошибка сканирования';
+        }
+      } catch (e) {
+        msg.textContent = String(e);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
