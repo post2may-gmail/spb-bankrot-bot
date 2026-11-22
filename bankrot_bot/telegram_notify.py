@@ -7,6 +7,7 @@ import httpx
 
 from bankrot_bot.models import Lot
 from bankrot_bot.photos import normalize_photo_urls
+from bankrot_bot.source_label import auction_form_label, source_label_from_url
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +31,12 @@ def format_lot_message(lot: Lot, *, short: bool = False) -> str:
     ]
     if lot.address:
         lines.append(f"📍 {_esc(lot.address)}")
-    if lot.auction_form:
-        lines.append(f"🏛 Форма: {_esc(lot.auction_form)}")
-    lines.append(f"Источник: {_esc(lot.source)}")
+    form_label = auction_form_label(lot.auction_form)
+    if form_label:
+        lines.append(f"🏛 Форма: {_esc(form_label)}")
+    source = source_label_from_url(lot.url, fallback=lot.source)
+    if source:
+        lines.append(f"Источник: {_esc(source)}")
     desc = (lot.description or "").strip()
     max_desc = 180 if short else 400
     if desc:
